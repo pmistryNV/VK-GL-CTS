@@ -41,6 +41,8 @@
  //#include "D:/githubnv//VK-GL-CTS/external/slang/slang.h"
 #include <slang.h>
 #include <slang-com-ptr.h>
+#include <iostream>
+#include <fstream>
 
 namespace vk
 {
@@ -287,18 +289,34 @@ namespace vk
 	protected:
 		std::string inputString;
 	};
+	typedef void (CALLBACK* PFNSPSETDIAGONSTICCB)(SlangCompileRequest*, SlangDiagnosticCallback, void const*);
+	typedef void (CALLBACK* PFNSPSETCOMMANDLINECOMPILERMODE)(SlangCompileRequest*);
+	typedef SlangResult(CALLBACK* PFNSPPROCESSCOMMANDLINEARG)(SlangCompileRequest*, char const*, int);
+	typedef SlangResult(CALLBACK* PFNSPCOMPILE)(SlangCompileRequest* request);
+	typedef SlangResult(CALLBACK* PFNCREATEGLOBALSESSION)(SlangInt, slang::IGlobalSession**);
+
+	typedef struct _slangLibFuncs {
+		PFNSPSETDIAGONSTICCB pfnspSetDiagnosticCallback = nullptr;
+		PFNSPPROCESSCOMMANDLINEARG pfnspProcessCommandLineArguments = nullptr;
+		PFNSPCOMPILE pfnspCompile = nullptr;
+		PFNCREATEGLOBALSESSION pfnslang_createGlobalSession = nullptr;
+		bool isInitialized() {
+			return (pfnspSetDiagnosticCallback && pfnspProcessCommandLineArguments && pfnspCompile && pfnslang_createGlobalSession);
+		}
+	} slangLibFuncs;
+
 	class SlangContext {
 	public:
 		Slang::ComPtr<slang::IGlobalSession> slangGlobalSession;
 		bool globalSessionInit = false;
+		std::string slangDllPath = "D:\\githubnv\\VK-GL-CTS\\external\\slang"; //This will be transformed to a environment variable SLANG_DLL_PATH
+		bool loadDLL = false;
+		HMODULE handle = nullptr;
+		slangLibFuncs m_sfn;
+
 		template<typename ... TArgs> inline void reportError(const char* format, TArgs... args)
 		{
 			printf(format, args...);
-#if 0
-			char buffer[4096];
-			sprintf_s(buffer, format, args...);
-			_Win32OutputDebugString(buffer);
-#endif
 		}
 
 		inline void diagnoseIfNeeded(slang::IBlob* diagnosticsBlob)
@@ -308,14 +326,166 @@ namespace vk
 				reportError("%s", (const char*)diagnosticsBlob->getBufferPointer());
 			}
 		}
+		int SetupSlangDLL()
+		{
+			if (!handle) {
+				if (!SetDllDirectoryA(slangDllPath.c_str())) {
+					std::cout << "failed to set slang dll PATH\n";
+					return SLANG_FAIL;
+				}
+				handle = LoadLibraryA("slang.dll");
+				if (NULL == handle) {
+					std::cout << "failed to load slang.dll\n";
+					return SLANG_FAIL;
+				}
+			}
+			return SLANG_OK;
+		}
 
-		// SLANG Interface to generate SIPRV
+		void getSlangFunctionHandles() {
+			m_sfn.pfnslang_createGlobalSession = (PFNCREATEGLOBALSESSION)GetProcAddress(handle, "slang_createGlobalSession");
+			m_sfn.pfnspCompile = (PFNSPCOMPILE)GetProcAddress(handle, "spCompile");
+			m_sfn.pfnspSetDiagnosticCallback = (PFNSPSETDIAGONSTICCB)GetProcAddress(handle, "spSetDiagnosticCallback");
+			m_sfn.pfnspProcessCommandLineArguments = (PFNSPPROCESSCOMMANDLINEARG)GetProcAddress(handle, "spProcessCommandLineArguments");
+			//m_sfn.pfnspSetCommandLineCompilerMode = (PFNSPSETCOMMANDLINECOMPILERMODE)GetProcAddress(handle, "spSetCommandLineCompilerMode");
+		}
+		static void _diagnosticCallback(
+			char const* message,
+			void*       /*userData*/)
+		{
+			printf("%s", message);
+		}
+
+		int setupSlangLikeSlangc(const std::vector<std::string>* sources, const ShaderBuildOptions& buildOptions, const ShaderLanguage shaderLanguage, std::vector<deUint32>* dst, glu::ShaderProgramInfo* buildInfo)
+		{
+			SlangResult result = SLANG_OK;
+
+			do {
+				result = SetupSlangDLL();
+				if (result != SLANG_OK) {
+					std::cout << "Failed to load SLANG DLL";
+					break;
+				}
+				getSlangFunctionHandles();
+				if (!m_sfn.isInitialized()) {
+					std::cout << "Failed to get function pointers";
+					break;
+				}
+				result = m_sfn.pfnslang_createGlobalSession(SLANG_API_VERSION, slangGlobalSession.writeRef());
+				if (result != SLANG_OK) {
+					std::cout << "Failed to create global session: " << std::hex << result << "\n";
+					break;
+				}
+				SlangCompileRequest* compileRequest = nullptr;
+				result = slangGlobalSession->createCompileRequest(&compileRequest);
+				if (result != SLANG_OK) {
+					std::cout << "Failed to create CompileRequest: " << std::hex << result << "\n";
+					break;
+				}
+				auto findSlangShaderStage = [](glu::ShaderType shaderType) {
+					switch (shaderType) {
+						case glu::SHADERTYPE_VERTEX:
+							return "vertex";
+						case glu::SHADERTYPE_FRAGMENT:
+							return "fragment";
+						case glu::SHADERTYPE_GEOMETRY:
+							return "geometry";
+						case glu::SHADERTYPE_COMPUTE:
+							return "compute";
+						default:
+							std::cout << "unsupported shader stage";
+							return "unknown";
+					}
+					return "unknown";
+				};
+				auto findSlangShaderExt = [](glu::ShaderType shaderType) {
+					switch (shaderType) {
+					case glu::SHADERTYPE_VERTEX:
+						return ".vert";
+					case glu::SHADERTYPE_FRAGMENT:
+						return ".frag";
+					case glu::SHADERTYPE_GEOMETRY:
+						return ".geom";
+					case glu::SHADERTYPE_COMPUTE:
+						return ".comp";
+					default:
+						std::cout << "unsupported shader stage";
+						return "";
+					}
+					return "";
+				};
+
+				for (int shaderType = 0; shaderType < glu::SHADERTYPE_LAST; shaderType++) {
+					if (!sources[shaderType].empty()) {
+						const std::string& srcText = getShaderStageSource(sources, buildOptions, (glu::ShaderType)shaderType);
+						glu::ShaderType shaderstage = glu::ShaderType(shaderType);
+						const char* slangShaderStage = findSlangShaderStage((glu::ShaderType)shaderType);
+						const char* fileExt = findSlangShaderExt((glu::ShaderType)shaderType);
+
+						SetCurrentDirectory(slangDllPath.c_str());
+						std::ofstream myfile;
+						std::string temp_fname = "test.slang";
+						temp_fname.append(fileExt);
+						myfile.open(temp_fname);
+						myfile << srcText.c_str();
+						myfile.close();
+
+						compileRequest->addSearchPath(slangDllPath.c_str());
+						compileRequest->setDiagnosticCallback(&_diagnosticCallback, nullptr);
+						compileRequest->setCommandLineCompilerMode();
+						const char* args[] = { "-target", "spirv", "-stage", slangShaderStage, "-entry", "main", "-allow-glsl", temp_fname.c_str() };
+						int argCount = sizeof(args) / sizeof(char*);//8;
+						result = compileRequest->processCommandLineArguments(args, argCount);
+						if (result != SLANG_OK) {
+							std::cout << "Failed to proces command line arguments: " << std::hex << result << "\n";
+							break;
+						}
+						const deUint64  compileStartTime = deGetMicroseconds();
+						glu::ShaderInfo shaderBuildInfo;
+
+						result = compileRequest->compile();
+						if (result != SLANG_OK) {
+							std::cout << "Failed to compile: " << std::hex << result << "\n";
+							break;
+
+						}
+						shaderBuildInfo.type = (glu::ShaderType)shaderType;
+						shaderBuildInfo.source = srcText;
+						shaderBuildInfo.infoLog = "";//shader.getInfoLog(); // \todo [2015-07-13 pyry] Include debug log?
+						shaderBuildInfo.compileTimeUs = deGetMicroseconds() - compileStartTime;
+						shaderBuildInfo.compileOk = (result == SLANG_OK);
+						buildInfo->shaders.push_back(shaderBuildInfo);
+
+						const deUint64  linkStartTime = deGetMicroseconds();
+
+						Slang::ComPtr<ISlangBlob> spirvCode;
+						compileRequest->getEntryPointCodeBlob(0, 0, spirvCode.writeRef());
+
+
+						//copy the SPIRV
+						uint32_t* buff32 = (uint32_t*)spirvCode->getBufferPointer();
+						size_t size = spirvCode->getBufferSize();
+						// print the buffer
+						for (int i = 0; i < size / 4; i++) {
+							//printf("%x ", buff32[i]);
+							dst->push_back(buff32[i]);
+						}
+						buildInfo->program.infoLog = "";//glslangProgram.getInfoLog(); // \todo [2015-11-05 scygan] Include debug log?
+						buildInfo->program.linkOk = true;
+						buildInfo->program.linkTimeUs = deGetMicroseconds() - linkStartTime;
+
+					}
+				}
+			} while (false);
+			return result;
+		}
+
+		// SLANG ISession Interface to generate SIPRV 
 		int setupSlang(const std::vector<std::string>* sources, const ShaderBuildOptions& buildOptions, const ShaderLanguage shaderLanguage, std::vector<deUint32>* dst, glu::ShaderProgramInfo* buildInfo)
 		{
 			SlangResult result = SLANG_OK;
 
 			if (!globalSessionInit) {
-				std::string slangDllPath = "D:\\githubnv\\VK-GL-CTS\\external\\slang"; //This will be transformed to a environment variable SLANG_DLL_PATH
 				// load DLL
 				if (!SetDllDirectoryA(slangDllPath.c_str())) {
 					std::cout << "failed to set slang dll PATH\n";
@@ -334,10 +504,19 @@ namespace vk
 					FreeLibrary(handle);
 					return SLANG_FAIL;
 				}
+				;
+				LPFNDLLFUNC1 pfnslang_createGlobalSession = (LPFNDLLFUNC1)GetProcAddress(handle, "slang_createGlobalSession");
+				if (!pfnslang_createGlobalSession) {
+					// handle the error
+					std::cout << "failed to get create global session method\n";
+					FreeLibrary(handle);
+					return SLANG_FAIL;
+				}
+
 				//Slang::ComPtr<slang::IGlobalSession> slangGlobalSession;
 				//result = slang::createGlobalSession(slangGlobalSession.writeRef());
 				//result = slang_createGlobalSessionWithoutStdLib(SLANG_API_VERSION, slangGlobalSession.writeRef());
-				result = pfnslang_createGlobalSessionWithoutStdLib(SLANG_API_VERSION, slangGlobalSession.writeRef());
+				result = pfnslang_createGlobalSession(SLANG_API_VERSION, slangGlobalSession.writeRef());
 				if (result != SLANG_OK) {
 					std::cout << "Failed to create global session: " << std::hex << result << "\n";
 					return result;
@@ -370,19 +549,35 @@ namespace vk
     				session->setAllowGLSLInput(true);
     				slang::IModule* slangModule = nullptr;
     				{
+						//write the file onto the disk temporarily
+						//SetCurrentDirectory(slangDllPath);
+						std::ofstream myfile;
+						myfile.open("test.slang");
+						myfile << srcText.c_str();
+						myfile.close();
+
+						char* path = ".\\";
     					Slang::ComPtr<slang::IBlob> diagnosticBlob;
     					SlangBlob blobSource = SlangBlob(srcText);
-    					slangModule = session->loadModuleFromSource("cts-test", "", &blobSource, diagnosticBlob.writeRef());
+    					//slangModule = session->loadModuleFromSource("cts-test", path, &blobSource, diagnosticBlob.writeRef());
+						slangModule = session->loadModule("test", diagnosticBlob.writeRef());
+						if (!slangModule) {
+							std::cout << "Failed to load the module\n";
+							diagnoseIfNeeded(diagnosticBlob);
+							result = SLANG_FAIL;
+						}
     				}
-    				if (!slangModule) {
-    					std::cout << "Failed to load the module\n";
-                        result = SLANG_FAIL;
-                        break;
-    					//return SLANG_FAIL;
-    				}
-
+					// ERROR: loadModule fails to find the entry point as it is looking for "[shader("compute")]" to identify the entry point
+					// Hence switching to slangc mechanism for the same
                     const deUint64  compileStartTime    = deGetMicroseconds();
                     glu::ShaderInfo shaderBuildInfo;
+					if (result == SLANG_FAIL) {
+						shaderBuildInfo.type = (glu::ShaderType)shaderType;
+						shaderBuildInfo.source = srcText;
+						shaderBuildInfo.infoLog = "";//shader.getInfoLog(); // \todo [2015-07-13 pyry] Include debug log?
+						shaderBuildInfo.compileOk = false;
+						return SLANG_FAIL;
+					}
 
             		ComPtr<slang::IEntryPoint> entryPoint;
             		result = slangModule->findEntryPointByName("main", entryPoint.writeRef());
@@ -460,6 +655,7 @@ namespace vk
 							//}
 							//deUint32 data = std::stoi(buff[i], 0, 10);
 							dst->push_back(d);
+
                         }
                     }
                     return result;
@@ -487,7 +683,9 @@ namespace vk
 		getDefaultBuiltInResources(&builtinRes);
 #ifdef _WIN32
 		if (enableSlang) {
-			int result = g_slangContext.setupSlang(sources, buildOptions, shaderLanguage, dst, buildInfo);
+			//int result = g_slangContext.setupSlang(sources, buildOptions, shaderLanguage, dst, buildInfo);
+			g_slangContext.setupSlangLikeSlangc(sources, buildOptions, shaderLanguage, dst, buildInfo);
+			return buildInfo->program.linkOk;
 		}
 
 #endif
