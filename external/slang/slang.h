@@ -4179,6 +4179,8 @@ namespace slang
 
         virtual SLANG_NO_THROW void SLANG_MCALL setReportPerfBenchmark(bool value) = 0;
 
+        virtual SLANG_NO_THROW void SLANG_MCALL setSkipSPIRVValidation(bool value) = 0;
+
     };
 
     #define SLANG_UUID_ICompileRequest ICompileRequest::getTypeGuid()
@@ -4442,10 +4444,6 @@ namespace slang
             ITypeConformance** outConformance,
             SlangInt conformanceIdOverride,
             ISlangBlob** outDiagnostics) = 0;
-        //Workaround interfaces to be removed as part of https://github.com/shader-slang/slang/issues/3369
-        virtual SLANG_NO_THROW bool SLANG_MCALL  getAllowGLSLInput() = 0;
-        virtual SLANG_NO_THROW void SLANG_MCALL  setAllowGLSLInput(bool value) = 0;
-
     };
 
     #define SLANG_UUID_ISession ISession::getTypeGuid()
