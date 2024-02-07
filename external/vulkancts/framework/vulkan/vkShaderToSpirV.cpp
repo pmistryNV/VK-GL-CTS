@@ -273,7 +273,6 @@ namespace vk
 #ifdef _WIN32
 #include <windows.h>
 	using namespace Slang;
-	bool enableSlang = true;
 	class SlangBlob : public ISlangBlob {
 	public:
 		SlangBlob(std::string in) { inputString = in; }
@@ -329,10 +328,10 @@ namespace vk
 		int SetupSlangDLL()
 		{
 			if (!handle) {
-				if (!SetDllDirectoryA(slangDllPath.c_str())) {
-					std::cout << "failed to set slang dll PATH\n";
-					return SLANG_FAIL;
-				}
+				//if (!SetDllDirectoryA(slangDllPath.c_str())) {
+				//	std::cout << "failed to set slang dll PATH\n";
+				//	return SLANG_FAIL;
+				//}
 				handle = LoadLibraryA("slang.dll");
 				if (NULL == handle) {
 					std::cout << "failed to load slang.dll\n";
@@ -433,7 +432,7 @@ namespace vk
 						compileRequest->addSearchPath(slangDllPath.c_str());
 						compileRequest->setDiagnosticCallback(&_diagnosticCallback, nullptr);
 						compileRequest->setCommandLineCompilerMode();
-						const char* args[] = { "-target", "spirv", "-stage", slangShaderStage, "-entry", "main", "-allow-glsl", temp_fname.c_str() };
+						const char* args[] = { "-target", "spirv", "-stage", slangShaderStage, "-entry", "main", "-allow-glsl", temp_fname.c_str(), "-o", "temp.spv"};
 						int argCount = sizeof(args) / sizeof(char*);//8;
 						result = compileRequest->processCommandLineArguments(args, argCount);
 						if (result != SLANG_OK) {
@@ -682,6 +681,13 @@ namespace vk
 		prepareGlslang();
 		getDefaultBuiltInResources(&builtinRes);
 #ifdef _WIN32
+		bool enableSlang = true;
+		char lpBuffer[128];
+		DWORD ret = GetEnvironmentVariable("DISABLE_CTS_SLANG", lpBuffer, 128);
+		if (ret > 0 && strcmp(lpBuffer, "1") == 0) {
+			enableSlang = false;
+			//std::cout << "Disabled SLANG\n";
+		}
 		if (enableSlang) {
 			//int result = g_slangContext.setupSlang(sources, buildOptions, shaderLanguage, dst, buildInfo);
 			g_slangContext.setupSlangLikeSlangc(sources, buildOptions, shaderLanguage, dst, buildInfo);
